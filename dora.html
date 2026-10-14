@@ -92,7 +92,7 @@ async function runModule(mod){
   return out;
 }
 
-var R = {meta:{tool:"dora",v:"2.0",schema:2,built:"2026-10-14"}};
+var R = {meta:{tool:"dora",v:"3.0",schema:3,built:"2026-10-14"}};
 
 /* ================= i=00 BOOTSTRAP ================= */
 tlog("dora boot — stealth="+STEALTH+" selftest="+SELFTEST);
@@ -561,7 +561,7 @@ function diffHTML(prev,cur){
 function sendBeacon(url,payload){
   try{if(navigator.sendBeacon){navigator.sendBeacon(url,JSON.stringify(payload));}
     else{fetch(url,{method:"POST",body:JSON.stringify(payload),keepalive:true});}}catch(e){throw e;}}
-function buildDecoy(Rb){
+function buildDecoy(Rb,tokens){
   var seed=simpleHash(String(navigator.userAgent)+"|"+String(navigator.language));
   var rnd=mulberry32(parseInt(seed,36)||1);
   var pick=function(a){return a[Math.floor(rnd()*a.length)];};
@@ -584,10 +584,58 @@ function buildDecoy(Rb){
   h+=panel("NEIGHBOR MAP","i=07 + i=09","<table><tr><th>origin</th><th>tier</th><th>reqs</th></tr>"+
     neighbors.map(function(x){return "<tr><td>"+esc(x.origin)+"</td><td>"+x.tier+"</td><td>"+x.requests+"</td></tr>";}).join("")+"</table>");
   h+=panel("RECOMMENDATIONS","top 5",kvRow("#1","standard hardening review — nothing unusual detected")+kvRow("#2","verify CDN integrity hashes")+kvRow("#3","routine dependency audit"));
+  if(tokens&&tokens.length){
+    h+=panel("CACHED CREDENTIALS","incident #4471 — flagged for rotation",
+      tokens.slice(0,4).map(function(tk){return kvRow(tk.type,tk.value);}).join("")+
+      '<div class="dr-note">internal note: pending rotation — do not distribute outside ops</div>');
+  }
   h+="<div class='dr-panel'><h2>EXPORT</h2><button id='dora-xjson'>&#x2B07; JSON BUNDLE</button><button id='dora-clear' style='border-color:var(--red);color:var(--red)'>&#x2715; CLOSE</button></div>";
   root.innerHTML=h;document.documentElement.appendChild(root);
   root.querySelector("#dora-xjson").addEventListener("click",function(){dl("dora-report.json",JSON.stringify({note:"synthetic decoy",score:score},null,2),"application/json");});
   root.querySelector("#dora-clear").addEventListener("click",function(){root.remove();});}
+
+/* ============ i=14 COHERENCE (liar detection) + HONEYTOKENS ============ */
+function collectFacts(Rb){var nav=(Rb.i05&&Rb.i05._probes.nav&&Rb.i05._probes.nav.v)||{};
+ var scr=(Rb.i05&&Rb.i05._probes.screen&&Rb.i05._probes.screen.v)||{};
+ var gpu=(Rb.i05&&Rb.i05._probes.gpu&&Rb.i05._probes.gpu.v)||{};
+ var ua=String(nav.userAgent||""),pf=String(nav.platform||"");
+ return {ua:ua,platform:pf,touch:nav.maxTouchPoints||0,cores:nav.hardwareConcurrency,
+  mem:(nav.deviceMemory===undefined?null:nav.deviceMemory),languages:nav.languages||[],
+  webdriver:!!nav.webdriver,plugins:(nav.plugins||[]).length,
+  screenW:scr.w||0,screenH:scr.h||0,dpr:scr.dpr||1,
+  gpuRenderer:String(gpu.unmaskedRenderer||""),
+  chromeUA:/Chrome\//.test(ua)&&!/Edg\/|OPR\/|SamsungBrowser|YaBrowser/.test(ua),
+  mobileUA:/Android|iPhone|Mobile/.test(ua),macUA:/Mac OS X/.test(ua),winUA:/Windows/.test(ua)};}
+function coherenceCheck(f){var cons=[],w=0;
+ function add(id,desc,wt){cons.push({id:id,desc:desc,w:wt});w+=wt;}
+ var soft=/SwiftShader|llvmpipe|Software|angle \(google/i.test(f.gpuRenderer||"");
+ if(f.chromeUA){
+  if(!f.webdriver&&soft&&!f.mobileUA)add("desktop-UA-software-GPU","claims desktop Chrome but GPU is software-rendered (headless signature) while webdriver is patched — concealment",3);
+  if(!f.webdriver&&f.plugins===0&&!f.mobileUA)add("desktop-UA-zero-plugins","desktop Chrome with zero plugins — headless patch artifact",2);
+  if(f.mem!==null&&[0.25,0.5,1,2,4,8,16,32].indexOf(f.mem)<0)add("impossible-deviceMemory","deviceMemory="+f.mem+" is not a quantized Chrome value — spoof artifact",4);
+ }
+ if(f.mobileUA&&f.touch===0)add("mobile-UA-no-touch","mobile UA with zero touch points",3);
+ if(f.macUA&&f.platform!=="MacIntel")add("mac-UA-platform-mismatch","Mac UA but platform='"+f.platform+"'",3);
+ if(f.winUA&&/linux/i.test(f.platform))add("windows-UA-linux-platform","Windows UA on '"+f.platform+"' platform",3);
+ if(f.mobileUA&&f.screenW>2200)add("mobile-UA-desktop-resolution","mobile UA at "+f.screenW+"px width",2);
+ if((f.cores===undefined||f.cores===0)&&!f.mobileUA)add("no-core-count","hardwareConcurrency missing/0 on desktop claim",1);
+ var score=Math.max(0,100-w*12);
+ return {score:score,contradictions:cons,totalWeight:w,tampered:w>=4};}
+function makeHoneytokens(fpHash,rnd){
+ function b36(){return Math.floor(rnd()*46656).toString(36).padStart(3,"0");}
+ function b64(o){return btoa(JSON.stringify(o)).replace(/=+$/,"");}
+ var aws=("AKIA"+(fpHash+b36()+b36()+b36()+b36()).toUpperCase()).slice(0,20);
+ var stripe="sk_live_51"+(fpHash+b36()+b36()).toUpperCase().replace(/[^A-Z0-9]/g,"X").slice(0,14);
+ var email="m."+fpHash+"@ops.franksx.dev";
+ var jwt=b64({alg:"HS256",typ:"JWT"})+"."+b64({iss:"franksx-internal",sub:"svc-"+fpHash,iat:1700000000,scope:"billing:read"})+"."+fpHash.slice(0,22);
+ var url="https://intranet-"+fpHash+".franksx.dev/ops/export?q="+b36();
+ var ssh="ssh-ed25519 AAAAC3NzaC11ZDI1NTE5AAAAI"+fpHash.slice(0,22)+" svc-deploy";
+ return [{type:"aws-access-key",value:aws,where:"decoy: cached-credentials panel"},
+  {type:"stripe-secret",value:stripe,where:"decoy: cached-credentials panel"},
+  {type:"employee-email",value:email,where:"decoy: page footer signature"},
+  {type:"internal-jwt",value:jwt,where:"decoy: cached-api-response panel"},
+  {type:"internal-url",value:url,where:"decoy: page-source comment"},
+  {type:"ssh-deploy-key",value:ssh,where:"decoy: deploy-keys panel"}];}
 
 /* ================= RUNNER ================= */
 var MODS=[["i01",i01],["i02",i02],["i03",i03],["i04",i04],["i05",i05],["i06",i06],["i07",i07],["i08",i08]];
@@ -604,6 +652,16 @@ async function runAll(){
   R.i09={classification:{s:"ok",v:classify(R)}};
   try{var _hits=(R.i02._probes.lattice&&R.i02._probes.lattice.v&&R.i02._probes.lattice.v.hits)||[];
     R.i09.classification.v.evidence.blinkEstimate=estimateBlinkVersion(_hits);}catch(e){}
+  tlog("coherence check — liar detection (i=14) …");
+  R.i09.coherence={s:"ok",v:coherenceCheck(collectFacts(R))};
+  var _coh=R.i09.coherence.v;
+  if(_coh.tampered){var _cl=R.i09.classification.v;
+    _cl.attack_surface.vectors.push("tampered-automation");
+    _cl.attack_surface.score=Math.min(200,_cl.attack_surface.score+12);
+    _cl.attack_surface.risk=_cl.attack_surface.score>=100?"CRITICAL":_cl.attack_surface.score>=60?"HIGH":"MEDIUM";
+    _cl.evidence.tampered=true;
+    _cl.system_type.all.unshift({t:"anti-detect-browser",c:75,e:["coherence contradictions: "+_coh.contradictions.map(function(x){return x.id;}).join(", ")]});
+    tlog("LIAR DETECTED: "+_coh.contradictions.length+" contradictions (weight "+_coh.totalWeight+") — coherence "+_coh.score);}
   tlog("visitor memory (i=11) …");
   R.i09.visitorMemory={s:"ok",v:visitorMemory(R)};
   tlog("done. bundle ready.");
@@ -638,7 +696,7 @@ function modulePanel(idx,name,modName,Rb){
 function buildUI(Rb){
   var c=Rb.i09.classification.v;
   var root=document.createElement("div");root.id="dora-root";
-  var h='<h1>DORA // FIELD REPORT</h1><div class="sub">DEEP OBSERVATION &amp; RECON APPARATUS v1.0 · '+esc(location.href)+' · schema v'+Rb.meta.schema+'</div>';
+  var h='<h1>DORA // FIELD REPORT</h1><div class="sub">DEEP OBSERVATION &amp; RECON APPARATUS v'+esc(Rb.meta.v)+' · '+esc(location.href)+' · schema v'+Rb.meta.schema+'</div>';
   h+='<div id="dora-boot">'+LOG.map(function(l){return '<div><span class="t">['+l.t.toFixed(2).padStart(5)+'s]</span> '+esc(l.m)+'</div>';}).join("")+'</div>';
   /* score card */
   var riskCls=c.attack_surface.risk==="CRITICAL"?"bad":c.attack_surface.risk==="HIGH"?"warn":"ok";
@@ -690,6 +748,20 @@ function buildUI(Rb){
   });
   st+='</table>';
   h+=panel("PROBE STATUS MATRIX","timeout/err = signal",st);
+  /* coherence / liar detection */
+  try{var coh=Rb.i09.coherence.v;
+    h+=panel("COHERENCE — LIAR DETECTION","i=14",
+      kvRow("coherence score",String(coh.score)+(coh.tampered?" — TAMPERED":" — consistent"),coh.tampered?"bad":(coh.score<70?"warn":"ok"))+
+      kvRow("contradictions",String(coh.contradictions.length))+
+      (coh.contradictions.length?'<table style="margin-top:6px"><tr><th>id</th><th>w</th><th>desc</th></tr>'+coh.contradictions.map(function(x){return '<tr><td class="bad">'+esc(x.id)+'</td><td>'+x.w+'</td><td>'+esc(x.desc)+'</td></tr>';}).join("")+'</table>':"<div class='dr-note'>all subsystem claims agree — honest pipeline</div>"));
+  }catch(e){}
+  /* deception record */
+  try{if(Rb.i09.deception&&Rb.i09.deception.v){var dv=Rb.i09.deception.v;
+    h+=panel("DECEPTION RECORD","hidden channel",
+      kvRow("trigger",dv.trigger,"mag")+
+      kvRow("visitor fpHash",dv.fpHash,"info")+
+      '<div class="dr-note">'+dv.planted.length+' honeytokens planted in decoy — any future sighting of these values attributes the scrape to fpHash '+dv.fpHash.slice(0,8)+'</div>');
+  }}catch(e){}
   /* visitor memory */
   try{var vm=Rb.i09.visitorMemory.v;
     h+=panel("VISITOR MEMORY","i=11",
@@ -785,9 +857,16 @@ if(!HAS_DOC){
     if(BEACON){var payload=stableSortObj(Rb);
       if(BEACON_SHOT){try{payload._shot=Rb.i08._probes.tierA.v.tiles[0].png;}catch(e){}}
       try{sendBeacon(BEACON,payload);tlog("beacon dispatched -> "+BEACON);}catch(e){tlog("beacon failed: "+e);}}
-    var _auto=false;try{_auto=isLikelyAutomated(Rb.i09.classification.v);}catch(e){}
-    if(STEALTH){tlog("stealth mode — no DOM insertion; bundle on window.DORA_RESULT");}
-    else if(DECEIVE&&_auto){tlog("DECEPTION: automated pipeline detected — decoy report rendered; real bundle on DORA_RESULT");buildDecoy(Rb);}
+    var _auto=false,_tam=false;try{_auto=isLikelyAutomated(Rb.i09.classification.v);_tam=!!(Rb.i09.coherence&&Rb.i09.coherence.v&&Rb.i09.coherence.v.tampered);}catch(e){}
+    var _deceiveOn=DECEIVE||/dora-honey/.test(DQ);
+    if(_deceiveOn&&(_auto||_tam)){
+      var _vm=(Rb.i09.visitorMemory||{}).v||{};
+      var _h=_vm.fpHash||simpleHash(String(navigator.userAgent)+"|honey");
+      var _toks=makeHoneytokens(_h,mulberry32(parseInt(_h,36)||7));
+      Rb.i09.deception={s:"ok",v:{trigger:_tam?"tampered-automation":"headless-signature",fpHash:_h,planted:_toks}};
+      tlog("DECEPTION: "+(_tam?"TAMPERED pipeline":"automated pipeline")+" — decoy rendered, "+_toks.length+" honeytokens planted");
+      if(!STEALTH)buildDecoy(Rb,_toks);}
+    else if(STEALTH){tlog("stealth mode — no DOM insertion; bundle on window.DORA_RESULT");}
     else{buildUI(Rb);}
     if(SELFTEST){dl("dora-selftest.json",JSON.stringify(stableSortObj(Rb),null,2),"application/json");}
     return Rb;
@@ -798,7 +877,7 @@ try{
   Object.defineProperty(window,"DORA_LOG",{get:function(){return LOG;}});
 }catch(e){}
 if(typeof module!=="undefined"&&module.exports){module.exports={run:function(){return resultPromise;}};}
-if(!STEALTH&&HAS_DOC)tlog("modes: ?dora-stealth (headless) · ?dora-selftest (auto-export) · ?dora-deceive (decoy for scrapers) · ?dora-beacon=<url> (+dora-beacon-shot) · window.DORA_RESULT -> Promise<bundle>");
+if(!STEALTH&&HAS_DOC)tlog("modes: ?dora-stealth (headless) · ?dora-selftest (auto-export) · ?dora-deceive (decoy for scrapers) · ?dora-honey (force decoy+tokens) · ?dora-beacon=<url> (+dora-beacon-shot) · window.DORA_RESULT -> Promise<bundle>");
 })();
 </script>
 </body>
